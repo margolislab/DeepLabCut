@@ -1,12 +1,14 @@
 """
-DeepLabCut2.0 Toolbox
+DeepLabCut2.0 Toolbox (deeplabcut.org)
+© A. & M. Mathis Labs
 https://github.com/AlexEMG/DeepLabCut
+Please see AUTHORS for contributors.
 
-A Mathis, alexander.mathis@bethgelab.org
-T Nath, nath@rowland.harvard.edu
-M Mathis, mackenzie@post.harvard.edu
-
+https://github.com/AlexEMG/DeepLabCut/blob/master/AUTHORS
+Licensed under GNU Lesser General Public License v3.0
 """
+
+
 import numpy as np
 import os
 from pathlib import Path
@@ -19,7 +21,7 @@ from tqdm import tqdm
 import matplotlib.pyplot as plt
 from skimage.util import img_as_ubyte
 
-def extract_outlier_frames(config,videos,videotype='avi',shuffle=1,trainingsetindex=0,outlieralgorithm='jump',comparisonbodyparts='all',epsilon=20,p_bound=.01,ARdegree=3,MAdegree=1,alpha=.01,extractionalgorithm='kmeans',automatic=False,cluster_resizewidth=30,cluster_color=False,opencv=True):
+def extract_outlier_frames(config,videos,videotype='avi',shuffle=1,trainingsetindex=0,outlieralgorithm='jump',comparisonbodyparts='all',epsilon=20,p_bound=.01,ARdegree=3,MAdegree=1,alpha=.01,extractionalgorithm='kmeans',automatic=False,cluster_resizewidth=30,cluster_color=False,opencv=True,savelabeled=True, destfolder=None):
     """
     Extracts the outlier frames in case, the predictions are not correct for a certain video from the cropped video running from
     start to stop as defined in config.yaml.
@@ -44,8 +46,8 @@ def extract_outlier_frames(config,videos,videotype='avi',shuffle=1,trainingsetin
     trainingsetindex: int, optional
         Integer specifying which TrainingsetFraction to use. By default the first (note that TrainingFraction is a list in config.yaml).
 
-    outlieralgorithm: 'fitting', 'jump', or 'uncertain', optional
-        String specifying the algorithm used to detect the outliers. Currently, deeplabcut supports three methods. 'Fitting'
+    outlieralgorithm: 'fitting', 'jump', 'uncertain', or 'manual'
+        String specifying the algorithm used to detect the outliers. Currently, deeplabcut supports three methods + a manual GUI option. 'Fitting'
         fits a Auto Regressive Integrated Moving Average model to the data and computes the distance to the estimated data. Larger distances than
         epsilon are then potentially identified as outliers. The methods 'jump' identifies larger jumps than 'epsilon' in any body part; and 'uncertain'
         looks for frames with confidence below p_bound. The default is set to ``jump``.
@@ -92,7 +94,16 @@ def extract_outlier_frames(config,videos,videotype='avi',shuffle=1,trainingsetin
     opencv: bool, default: True
         Uses openCV for loading & extractiong (otherwise moviepy (legacy))
 
-    Example
+    savelabeled: bool, default: True
+        If true also saves frame with predicted labels in each folder.
+
+    destfolder: string, optional
+        Specifies the destination folder that was used for storing analysis data (default is the path of the video).
+
+    Examples
+
+    Windows example for extracting the frames with default settings
+    >>> deeplabcut.extract_outlier_frames('C:\\myproject\\reaching-task\\config.yaml',['C:\\yourusername\\rig-95\\Videos\\reachingvideo1.avi'])
     --------
     for extracting the frames with default settings
     >>> deeplabcut.extract_outlier_frames('/analysis/project/reaching-task/config.yaml',['/analysis/project/video/reachinvideo1.avi'])
@@ -106,21 +117,25 @@ def extract_outlier_frames(config,videos,videotype='avi',shuffle=1,trainingsetin
     """
 
     cfg = auxiliaryfunctions.read_config(config)
-    scorer=auxiliaryfunctions.GetScorerName(cfg,shuffle,trainFraction = cfg['TrainingFraction'][trainingsetindex])
-    print("network parameters:", scorer)
-
+    DLCscorer,DLCscorerlegacy=auxiliaryfunctions.GetScorerName(cfg,shuffle,trainFraction = cfg['TrainingFraction'][trainingsetindex])
     Videos=auxiliaryfunctions.Getlistofvideos(videos,videotype)
     for video in Videos:
-      videofolder = str(Path(video).parents[0])
-      dataname = str(Path(video).stem)+scorer
-      try:
-          Dataframe = pd.read_hdf(os.path.join(videofolder,dataname+'.h5'))
+      if destfolder is None:
+            videofolder = str(Path(video).parents[0])
+      else:
+            videofolder=destfolder
+
+      notanalyzed,dataname,DLCscorer=auxiliaryfunctions.CheckifNotAnalyzed(videofolder,str(Path(video).stem),DLCscorer,DLCscorerlegacy,flag='checking')
+      if notanalyzed:
+          print("It seems the video has not been analyzed yet, or the video is not found! You can only refine the labels after the a video is analyzed. Please run 'analyze_video' first. Or, please double check your video file path")
+      else:
+          Dataframe = pd.read_hdf(dataname,'df_with_missing')
+          scorer=Dataframe.columns.get_level_values(0)[0] #reading scorer from
           nframes=np.size(Dataframe.index)
-          #extract min and max index based on start stop interval.
+          # extract min and max index based on start stop interval.
           startindex=max([int(np.floor(nframes*cfg['start'])),0])
           stopindex=min([int(np.ceil(nframes*cfg['stop'])),nframes])
           Index=np.arange(stopindex-startindex)+startindex
-
           #figure out body part list:
           bodyparts=auxiliaryfunctions.IntersectionofBodyPartsandOnesGivenbyUser(cfg,comparisonbodyparts)
 
@@ -138,102 +153,46 @@ def extract_outlier_frames(config,videos,videotype='avi',shuffle=1,trainingsetin
                       dy=np.diff(Dataframe[scorer][bp]['y'].values[Index])
                       # all indices between start and stop with jump larger than epsilon (leading up to this point!)
                       Indices.extend(np.where((dx**2+dy**2)>epsilon**2)[0]+startindex+1)
-
           elif outlieralgorithm=='fitting':
               #deviation_dataname = str(Path(videofolder)/Path(dataname))
               # Calculate deviatons for video
-              [d,o] = ComputeDeviations(Dataframe,cfg,comparisonbodyparts,scorer,dataname,p_bound,alpha,ARdegree,MAdegree)
+              [d,o] = ComputeDeviations(Dataframe,cfg,bodyparts,scorer,dataname,p_bound,alpha,ARdegree,MAdegree)
+
               #Some heuristics for extracting frames based on distance:
               Indices=np.where(d>epsilon)[0] # time points with at least average difference of epsilon
 
               if len(Index)<cfg['numframes2pick']*2 and len(d)>cfg['numframes2pick']*2: # if too few points qualify, extract the most distant ones.
                   Indices=np.argsort(d)[::-1][:cfg['numframes2pick']*2]
+          elif outlieralgorithm=='manual':
+              wd = Path(config).resolve().parents[0]
+              os.chdir(str(wd))
+              from deeplabcut.refine_training_dataset import outlier_frame_extraction_toolbox
 
-          Indices=np.sort(list(set(Indices))) #remove repetitions.
-          print("Method ", outlieralgorithm, " found ", len(Indices)," putative outlier frames.")
-          print("Do you want to proceed with extracting ", cfg['numframes2pick'], " of those?")
-          if outlieralgorithm=='uncertain':
-              print("If this list is very large, perhaps consider changing the paramters (start, stop, p_bound, comparisonbodyparts) or use a different method.")
-          elif outlieralgorithm=='jump':
-              print("If this list is very large, perhaps consider changing the paramters (start, stop, epsilon, comparisonbodyparts) or use a different method.")
-          elif outlieralgorithm=='fitting':
-              print("If this list is very large, perhaps consider changing the paramters (start, stop, epsilon, ARdegree, MAdegree, alpha, comparisonbodyparts) or use a different method.")
+              outlier_frame_extraction_toolbox.show(config,video,shuffle,Dataframe,scorer,savelabeled)
+          # Run always except when the outlieralgorithm == manual.
+          if not outlieralgorithm=='manual':
+              Indices=np.sort(list(set(Indices))) #remove repetitions.
+              print("Method ", outlieralgorithm, " found ", len(Indices)," putative outlier frames.")
+              print("Do you want to proceed with extracting ", cfg['numframes2pick'], " of those?")
+              if outlieralgorithm=='uncertain':
+                  print("If this list is very large, perhaps consider changing the paramters (start, stop, p_bound, comparisonbodyparts) or use a different method.")
+              elif outlieralgorithm=='jump':
+                  print("If this list is very large, perhaps consider changing the paramters (start, stop, epsilon, comparisonbodyparts) or use a different method.")
+              elif outlieralgorithm=='fitting':
+                  print("If this list is very large, perhaps consider changing the paramters (start, stop, epsilon, ARdegree, MAdegree, alpha, comparisonbodyparts) or use a different method.")
 
-          if automatic==False:
-              askuser = input("yes/no")
-          else:
-              askuser='Ja'
+              if automatic==False:
+                  askuser = input("yes/no")
+              else:
+                  askuser='Ja'
 
-          if askuser=='y' or askuser=='yes' or askuser=='Ja' or askuser=='ha': # multilanguage support :)
-              #Now extract from those Indices!
-              ExtractFramesbasedonPreselection(Indices,extractionalgorithm,Dataframe,dataname,scorer,video,cfg,config,opencv,cluster_resizewidth,cluster_color)
-          else:
-              print("Nothing extracted, change parameters and start again...")
-
-      except FileNotFoundError:
-          print("The video has not been analyzed yet!. You can only refine the labels, after the pose has been estimate. Please run 'analyze_video' first.")
+              if askuser=='y' or askuser=='yes' or askuser=='Ja' or askuser=='ha': # multilanguage support :)
+                  #Now extract from those Indices!
+                  ExtractFramesbasedonPreselection(Indices,extractionalgorithm,Dataframe,dataname,scorer,video,cfg,config,opencv,cluster_resizewidth,cluster_color,savelabeled)
+              else:
+                  print("Nothing extracted, please change the parameters and start again...")
 
 
-def filterpredictions(config,video,shuffle=1,trainingsetindex=0,comparisonbodyparts='all',p_bound=.01,ARdegree=3,MAdegree=1,alpha=.01):
-    """
-    Fits frame-by-frame pose predictions with SARIMAX model.
-
-    Parameter
-    ----------
-    config : string
-        Full path of the config.yaml file as a string.
-
-    video : string
-        Full path of the video to extract the frame from. Make sure that this video is already analyzed.
-
-    shuffle : int, optional
-        The shufle index of training dataset. The extracted frames will be stored in the labeled-dataset for
-        the corresponding shuffle of training dataset. Default is set to 1
-
-    trainingsetindex: int, optional
-        Integer specifying which TrainingsetFraction to use. By default the first (note that TrainingFraction is a list in config.yaml).
-
-    comparisonbodyparts: list of strings, optional
-        This select the body parts for which SARIMAX models are fit. Either ``all``, then all body parts
-        from config.yaml are used orr a list of strings that are a subset of the full list.
-        E.g. ['hand','Joystick'] for the demo Reaching-Mackenzie-2018-08-30/config.yaml to select only these two body parts.
-
-    p_bound: float between 0 and 1, optional
-        For outlieralgorithm 'uncertain' this parameter defines the likelihood below, below which a body part will be flagged as a putative outlier.
-
-    ARdegree: int, optional
-        For outlieralgorithm 'fitting': Autoregressive degree of Sarimax model degree.
-        see https://www.statsmodels.org/dev/generated/statsmodels.tsa.statespace.sarimax.SARIMAX.html
-
-    MAdegree: int
-        For outlieralgorithm 'fitting': Moving Avarage degree of Sarimax model degree.
-        See https://www.statsmodels.org/dev/generated/statsmodels.tsa.statespace.sarimax.SARIMAX.html
-
-    alpha: float
-        Significance level for detecting outliers based on confidence interval of fitted SARIMAX model.
-
-    Example
-    --------
-    tba
-    --------
-
-    Returns filtered pandas array (incl. confidence interval), original data, distance and average outlier vector.
-
-    """
-
-    cfg = auxiliaryfunctions.read_config(config)
-    scorer=auxiliaryfunctions.GetScorerName(cfg,shuffle,trainFraction = cfg['TrainingFraction'][trainingsetindex])
-    print("network parameters:", scorer)
-    videofolder = str(Path(video).parents[0])
-    dataname = str(Path(video).stem)+scorer
-    bodyparts=auxiliaryfunctions.IntersectionofBodyPartsandOnesGivenbyUser(cfg,comparisonbodyparts)
-    try:
-        Dataframe = pd.read_hdf(os.path.join(videofolder,dataname+'.h5'))
-    except FileExistsError:
-        print("Could not find data.")
-
-    data,d,o = ComputeDeviations(Dataframe,cfg,bodyparts,scorer,dataname,p_bound,alpha,ARdegree,MAdegree,storeoutput='full')
-    return data,Dataframe,d,o
 
 def convertparms2start(pn):
     ''' Creating a start value for sarimax in case of an value error
@@ -247,7 +206,7 @@ def convertparms2start(pn):
     else:
         return 0
 
-def FitSARIMAXModel(x,p,pcutoff,alpha,ARdegree,MAdegree,nforecast = 0):
+def FitSARIMAXModel(x,p,pcutoff,alpha,ARdegree,MAdegree,nforecast = 0,disp=False):
     # Seasonal Autoregressive Integrated Moving-Average with eXogenous regressors (SARIMAX)
     # see http://www.statsmodels.org/stable/statespace.html#seasonal-autoregressive-integrated-moving-average-with-exogenous-regressors-sarimax
     Y=x.copy()
@@ -259,10 +218,10 @@ def FitSARIMAXModel(x,p,pcutoff,alpha,ARdegree,MAdegree,nforecast = 0):
         #Autoregressive Moving Average ARMA(p,q) Model
         #mod = sm.tsa.ARIMA(Y, order=(ARdegree,0,MAdegree)) #order=(ARdegree,0,MAdegree)
         try:
-            res = mod.fit(disp=True)
+            res = mod.fit(disp=disp)
         except ValueError: #https://groups.google.com/forum/#!topic/pystatsmodels/S_Fo53F25Rk (let's update to statsmodels 0.10.0 soon...)
             startvalues=np.array([convertparms2start(pn) for pn in mod.param_names])
-            res= mod.fit(start_params=startvalues,disp=True)
+            res= mod.fit(start_params=startvalues,disp=disp)
 
         predict = res.get_prediction(end=mod.nobs + nforecast-1)
         return predict.predicted_mean,predict.conf_int(alpha=alpha)
@@ -273,7 +232,7 @@ def ComputeDeviations(Dataframe,cfg,comparisonbodyparts,scorer,dataname,p_bound,
     ''' Fits Seasonal AutoRegressive Integrated Moving Average with eXogenous regressors model to data and computes confidence interval
     as well as mean fit. '''
 
-    print("Fitting state-space models with parameters", ARdegree,MAdegree)
+    print("Fitting state-space models with parameters:", ARdegree, MAdegree)
     bpindex=0
     ntimes=np.size(Dataframe.index)
 
@@ -281,21 +240,7 @@ def ComputeDeviations(Dataframe,cfg,comparisonbodyparts,scorer,dataname,p_bound,
         if bp in cfg['bodyparts']: #filter [who knows what users put in...]
             x,y,p=Dataframe[scorer][bp]['x'].values,Dataframe[scorer][bp]['y'].values,Dataframe[scorer][bp]['likelihood'].values
             meanx,CIx=FitSARIMAXModel(x,p,p_bound,alpha,ARdegree,MAdegree)
-            #meanx,CIx=meanx.values,CIx.values
             meany,CIy=FitSARIMAXModel(y,p,p_bound,alpha,ARdegree,MAdegree)
-            #meany,CIy=meany.values,CIy.values
-            '''
-            try:
-                meanx,CIx=FitSARIMAXModel(x,p,p_bound,alpha,ARdegree,MAdegree)
-                meanx,CIx=meanx,CIx
-            except ValueError:
-                meanx,CIx=np.nan*np.zeros(ntimes),np.nan*np.zeros((ntimes,2))
-            try:
-                meany,CIy=FitSARIMAXModel(y,p,p_bound,alpha,ARdegree,MAdegree)
-                meany,CIy=meany,CIy
-            except ValueError:
-                meany,CIy=np.nan*np.zeros(ntimes),np.nan*np.zeros((ntimes,2))
-            '''
             if storeoutput=='full': #stores both the means and the confidence interval (as well as the summary stats below)
 
                 pdindex = pd.MultiIndex.from_product(
@@ -345,7 +290,7 @@ def ComputeDeviations(Dataframe,cfg,comparisonbodyparts,scorer,dataname,p_bound,
             return np.zeros(ntimes), np.zeros(ntimes)
 
 
-def ExtractFramesbasedonPreselection(Index,extractionalgorithm,Dataframe,dataname,scorer,video,cfg,config,opencv=True,cluster_resizewidth=30,cluster_color=False):
+def ExtractFramesbasedonPreselection(Index,extractionalgorithm,Dataframe,dataname,scorer,video,cfg,config,opencv=True,cluster_resizewidth=30,cluster_color=False,savelabeled=True):
     from deeplabcut.create_project import add
     start  = cfg['start']
     stop = cfg['stop']
@@ -394,8 +339,9 @@ def ExtractFramesbasedonPreselection(Index,extractionalgorithm,Dataframe,datanam
             if  cfg['cropping']:
                 clip = clip.crop(y1=cfg['y1'], y2=cfg['x2'], x1=cfg['x1'], x2=cfg['x2'])
             frames2pick=frameselectiontools.KmeansbasedFrameselection(clip,numframes2extract,start,stop,Index,resizewidth=cluster_resizewidth,color=cluster_color)
+
     else:
-        print("Please implement this method yourself!")
+        print("Please implement this method yourself! Currently the options are 'kmeans', 'jump', 'uniform'.")
         frames2pick=[]
 
     # Extract frames + frames with plotted labels and store them in folder (with name derived from video name) nder labeled-data
@@ -404,9 +350,9 @@ def ExtractFramesbasedonPreselection(Index,extractionalgorithm,Dataframe,datanam
     strwidth = int(np.ceil(np.log10(nframes))) #width for strings
     for index in frames2pick: ##tqdm(range(0,nframes,10)):
         if opencv:
-            PlottingSingleFramecv2(cap,cv2,cfg['cropping'],coords,Dataframe,bodyparts,tmpfolder,index,scorer,cfg['dotsize'],cfg['pcutoff'],cfg['alphavalue'],colors,strwidth)
+            PlottingSingleFramecv2(cap,cv2,cfg['cropping'],coords,Dataframe,bodyparts,tmpfolder,index,scorer,cfg['dotsize'],cfg['pcutoff'],cfg['alphavalue'],colors,strwidth,savelabeled)
         else:
-            PlottingSingleFrame(clip,Dataframe,bodyparts,tmpfolder,index,scorer,cfg['dotsize'],cfg['pcutoff'],cfg['alphavalue'],colors,strwidth)
+            PlottingSingleFrame(clip,Dataframe,bodyparts,tmpfolder,index,scorer,cfg['dotsize'],cfg['pcutoff'],cfg['alphavalue'],colors,strwidth,savelabeled)
         plt.close("all")
 
     #close videos
@@ -418,7 +364,7 @@ def ExtractFramesbasedonPreselection(Index,extractionalgorithm,Dataframe,datanam
 
     # Extract annotations based on DeepLabCut and store in the folder (with name derived from video name) under labeled-data
     if len(frames2pick)>0:
-        Dataframe = pd.read_hdf(os.path.join(videofolder,dataname+'.h5'))
+        #Dataframe = pd.read_hdf(os.path.join(videofolder,dataname+'.h5'))
         DF = Dataframe.ix[frames2pick]
         DF.index=[os.path.join('labeled-data', vname,"img"+str(index).zfill(strwidth)+".png") for index in DF.index] #exchange index number by file names.
 
@@ -435,7 +381,10 @@ def ExtractFramesbasedonPreselection(Index,extractionalgorithm,Dataframe,datanam
             DF.to_hdf(machinefile,key='df_with_missing',mode='w')
             DF.to_csv(os.path.join(tmpfolder, "machinelabels.csv"))
         try:
-          add.add_new_videos(config,[video],coords=[coords]) # make sure you pass coords as a list
+            if cfg['cropping']:
+                add.add_new_videos(config,[video],coords=[coords]) # make sure you pass coords as a list
+            else:
+                add.add_new_videos(config,[video],coords=None)
         except: #can we make a catch here? - in fact we should drop indices from DataCombined if they are in CollectedData.. [ideal behavior; currently this is pretty unlikely]
             print("AUTOMATIC ADDING OF VIDEO TO CONFIG FILE FAILED! You need to do this manually for including it in the config.yaml file!")
             print("Videopath:", video,"Coordinates for cropping:", coords)
@@ -446,7 +395,7 @@ def ExtractFramesbasedonPreselection(Index,extractionalgorithm,Dataframe,datanam
     else:
         print("No frames were extracted.")
 
-def PlottingSingleFrame(clip,Dataframe,bodyparts2plot,tmpfolder,index,scorer,dotsize,pcutoff,alphavalue,colors,strwidth=4):
+def PlottingSingleFrame(clip,Dataframe,bodyparts2plot,tmpfolder,index,scorer,dotsize,pcutoff,alphavalue,colors,strwidth=4,savelabeled=True):
         ''' Label frame and save under imagename / this is already cropped (for clip) '''
         from skimage import io
         imagename1 = os.path.join(tmpfolder,"img"+str(index).zfill(strwidth)+".png")
@@ -482,10 +431,11 @@ def PlottingSingleFrame(clip,Dataframe,bodyparts2plot,tmpfolder,index,scorer,dot
             plt.subplots_adjust(
                 left=0, bottom=0, right=1, top=1, wspace=0, hspace=0)
             plt.gca().invert_yaxis()
-            plt.savefig(imagename2)
+            if savelabeled:
+                plt.savefig(imagename2)
             plt.close("all")
 
-def PlottingSingleFramecv2(cap,cv2,crop,coords,Dataframe,bodyparts2plot,tmpfolder,index,scorer,dotsize,pcutoff,alphavalue,colors,strwidth=4):
+def PlottingSingleFramecv2(cap,cv2,crop,coords,Dataframe,bodyparts2plot,tmpfolder,index,scorer,dotsize,pcutoff,alphavalue,colors,strwidth=4,savelabeled=True):
         ''' Label frame and save under imagename / cap is not already cropped. '''
         from skimage import io
         imagename1 = os.path.join(tmpfolder,"img"+str(index).zfill(strwidth)+".png")
@@ -527,7 +477,8 @@ def PlottingSingleFramecv2(cap,cv2,crop,coords,Dataframe,bodyparts2plot,tmpfolde
             plt.subplots_adjust(
                 left=0, bottom=0, right=1, top=1, wspace=0, hspace=0)
             plt.gca().invert_yaxis()
-            plt.savefig(imagename2)
+            if savelabeled:
+                plt.savefig(imagename2)
             plt.close("all")
 
 

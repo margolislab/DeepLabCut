@@ -1,10 +1,11 @@
 """
-DeepLabCut2.0 Toolbox
+DeepLabCut2.0 Toolbox (deeplabcut.org)
+© A. & M. Mathis Labs
 https://github.com/AlexEMG/DeepLabCut
-A Mathis, alexander.mathis@bethgelab.org
-T Nath, nath@rowland.harvard.edu
-M Mathis, mackenzie@post.harvard.edu
 
+Please see AUTHORS for contributors.
+https://github.com/AlexEMG/DeepLabCut/blob/master/AUTHORS
+Licensed under GNU Lesser General Public License v3.0
 """
 
 
@@ -62,28 +63,30 @@ def add_new_videos(config,videos,copy_videos=False,coords=None):
     
     destinations = [video_path.joinpath(vp.name) for vp in videos]
     if copy_videos==True:
-        print("Copying the videos")
         for src, dst in zip(videos, destinations):
-            shutil.copy(os.fspath(src),os.fspath(dst)) 
+            if dst.exists():
+                pass
+            else:
+                print("Copying the videos")
+                shutil.copy(os.fspath(src),os.fspath(dst)) 
     else:
-        print("Creating the symbolic link of the video")
         for src, dst in zip(videos, destinations):
-            if dst.exists() and not DEBUG:
-                raise FileExistsError('Video {} exists already!'.format(dst))
-            try:
+            if dst.exists():
+                pass
+            else:
+                print("Creating the symbolic link of the video")
                 src = str(src)
                 dst = str(dst)
                 os.symlink(src, dst)
-            except shutil.SameFileError:
-                if not DEBUG:
-                    raise
     
     if copy_videos==True:
         videos=destinations # in this case the *new* location should be added to the config file
     # adds the video list to the config.yaml file
     for idx,video in enumerate(videos):
         try:
-           video_path = os.path.realpath(video)
+# For windows os.path.realpath does not work and does not link to the real video. 
+           video_path = str(Path.resolve(Path(video)))
+#           video_path = os.path.realpath(video)
         except:
            video_path = os.readlink(video)
 
